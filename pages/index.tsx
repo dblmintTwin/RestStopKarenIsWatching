@@ -108,7 +108,17 @@ export default function Home() {
               Walk the dogs. Plan your route. Don&apos;t get caught before the daylight runs out.
             </p>
 
-            {/* Email signup — replaces the previous Play Now CTA */}
+            {/* Primary CTA: launch the game */}
+            <div className="mt-10">
+              <a
+                href="/game/index.html"
+                className="inline-block rounded-full bg-[#11151d] px-12 py-5 text-xl font-black uppercase tracking-wider text-white shadow-2xl ring-4 ring-[#ffe066]/60 transition hover:bg-[#3b6be2] hover:ring-[#ffe066] sm:text-2xl"
+              >
+                ▶ Play Now
+              </a>
+            </div>
+
+            {/* Secondary CTA: email signup for launch news */}
             {status === "success" ? (
               <div className="mx-auto mt-10 max-w-md rounded-2xl border border-white/40 bg-white/95 p-5 shadow-xl">
                 <p className="text-base font-bold text-[#11151d] sm:text-lg">
