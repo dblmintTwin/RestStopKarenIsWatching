@@ -35,6 +35,9 @@ var S = {
   // opening
   pee: 45,
   risky: false,
+  // highway phase (pre-gamble drive)
+  highwayDuration: 0,   // randomized 2.5-10s on entry
+  carSpeed: 0,          // px/sec; coast value sits around ~140
   // dogs / phase 2
   poop: 0,
   karen: 0,
@@ -261,7 +264,7 @@ function onPress(k) {
 }
 
 function isGameplay(st) {
-  return st === "DASH" || st === "RETURN" || st === "GAUNTLET" || st === "GETAWAY";
+  return st === "HIGHWAY" || st === "DASH" || st === "RETURN" || st === "GAUNTLET" || st === "GETAWAY";
 }
 
 /* ------------------------------ state changes ---------------------------- */
@@ -270,17 +273,27 @@ function setState(s) { S.prev = S.state; S.state = s; S.t = 0; S.paused = false;
 function flash(msg, dur) { S.flash = msg; S.flashT = dur || 2.2; }
 
 function startRun() {
-  S.daylight = 1000;
+  S.daylight = DAYLIGHT_MAX;   // start at full daylight (morning sky)
   S.pee = 45; S.poop = 0; S.karen = 0;
   S.piles = []; S.dogs = []; S.held = null;
   S.copTimer = 0; S.result = null;
-  setState("GAMBLE");
+  S.highwayDuration = rand(2.5, 10);  // when the rest-stop sign appears
+  S.carSpeed = 140;                    // start coasting at a moderate clip
+  S.cam = 0;
+  setState("HIGHWAY");
 }
 
 function beginDash(risky) {
   S.risky = risky;
-  if (risky) { S.daylight = 1120; S.pee = 62; }   // bonus daylight, less margin
-  else { S.daylight = 980; S.pee = 45; }
+  // Daylight now carries over from HIGHWAY. Safe = keep what you have,
+  // risky = +140 bonus (capped at DAYLIGHT_MAX). Pee meter still set fresh.
+  if (risky) {
+    S.daylight = Math.min(DAYLIGHT_MAX, S.daylight + 140);
+    S.pee = 62;
+  } else {
+    S.pee = 45;
+  }
+  S.cam = 0;
   S.player = { x: 240, y: HORIZON + 110, vx: 0, face: 1, walk: 0 };
   setState("DASH");
   flash(risky ? "Risked it! Bonus daylight - now RUN!" : "Pulled over. Get to the restroom!", 2.4);
@@ -336,8 +349,11 @@ function gauntletAction() {
       return;
     }
   }
-  // 4) in the DOG AREA with a dog -> let them relieve themselves here (safe)
-  if (inZone(p.x) && hasLooseOrHeld() && S.poop > 35) {
+  // 4) in the DOG AREA while LEADING a dog -> let them relieve themselves here.
+  // Requires S.held (not just any non-secured dog) so that approaching a loose
+  // dog in the zone doesn't accidentally trigger the relieve action and block
+  // grabbing — fixes the "can't grab the Lab when it's near Karen" bug.
+  if (inZone(p.x) && S.held && S.poop > 35) {
     S.piles.push({ x: clamp(p.x, ZONE_X1 + 20, ZONE_X2 - 20), inZone: true });
     S.poop = 0;
     flash("Good - they went in the dog area. Now scoop it!", 2.2);
@@ -397,7 +413,8 @@ function update(dt) {
   if (S.flashT > 0) S.flashT -= dt;
   if (S.paused) return;
   var st = S.state;
-  if (st === "DASH") updateDash(dt);
+  if (st === "HIGHWAY") updateHighway(dt);
+  else if (st === "DASH") updateDash(dt);
   else if (st === "RESTROOM") updateRestroom(dt);
   else if (st === "RETURN") updateReturn(dt);
   else if (st === "GAUNTLET") updateGauntlet(dt);
@@ -406,6 +423,34 @@ function update(dt) {
   if (S.player && isGameplay(st)) {
     var target = clamp(S.player.x - W / 2, 0, WORLD - W);
     S.cam += (target - S.cam) * Math.min(1, dt * 6);
+  }
+}
+
+function updateHighway(dt) {
+  // Player drives the car forward; after a random 2.5-10s the rest-stop
+  // sign appears (transition to GAMBLE). Daylight ticks at half the
+  // gameplay rate so the morning drive doesn't burn too much budget.
+  drainDaylight(dt, 5);
+
+  // Speed control: hold right to accelerate, left to brake, otherwise
+  // settle toward a coast value. Hard floor so the timer always counts down.
+  var COAST = 140, MAX = 360, MIN = 60;
+  if (isDown("ArrowRight") || isDown("d") || isDown("D")) {
+    S.carSpeed = Math.min(S.carSpeed + 220 * dt, MAX);
+  } else if (isDown("ArrowLeft") || isDown("a") || isDown("A")) {
+    S.carSpeed = Math.max(S.carSpeed - 320 * dt, MIN);
+  } else {
+    // coast back toward COAST from either side
+    if (S.carSpeed > COAST) S.carSpeed = Math.max(S.carSpeed - 90 * dt, COAST);
+    else if (S.carSpeed < COAST) S.carSpeed = Math.min(S.carSpeed + 60 * dt, COAST);
+  }
+
+  // Scroll the world past the car. drawGround uses S.cam for lane stripes.
+  S.cam += S.carSpeed * dt;
+
+  // Countdown using S.t (reset by setState on each state change).
+  if (S.t >= S.highwayDuration) {
+    setState("GAMBLE");
   }
 }
 
@@ -544,9 +589,10 @@ function updateDogs(dt) {
     }
     // loose behaviors
     if (d.type === "chihuahua") {
-      // flees from the player, fast and twitchy
-      if (Math.abs(d.x - p.x) < 280) {
-        d.x += Math.sign(d.x - p.x || 1) * 230 * dt;
+      // flees from the player, fast and twitchy (toned down for grabability:
+      // detection 280->220, flee speed 230->180 so sprinting actually catches)
+      if (Math.abs(d.x - p.x) < 220) {
+        d.x += Math.sign(d.x - p.x || 1) * 180 * dt;
       } else {
         d.retarget -= dt;
         if (d.retarget <= 0) { d.vx = rand(-120, 120); d.retarget = rand(0.4, 1.1); }
@@ -572,12 +618,16 @@ function updateDogs(dt) {
    ========================================================================= */
 function skyStops(f) {
   // keyframes: [f, top, mid, bot]
+  // f=1.0 = morning (sunrise peach), f=0.85 = midday blue, then afternoon ->
+  // golden hour -> sunset -> dusk. Adding the morning band shifted midday
+  // blue down from f=1.0 to f=0.85; the rest are unchanged.
   var K = [
-    [1.0, "#3f8fd6", "#8fc3ec", "#d7ecff"],
-    [0.62, "#4a86c4", "#f0cf95", "#ffe9bf"],
-    [0.38, "#6d6aa8", "#f3a24e", "#ffd279"],
-    [0.18, "#322d62", "#d8503f", "#ffce74"],
-    [0.0, "#141b3a", "#34315f", "#b5675a"]
+    [1.0, "#9ec1e5", "#ffc8a8", "#ffd9c0"],   // MORNING (pale blue overhead, peach horizon)
+    [0.85, "#3f8fd6", "#8fc3ec", "#d7ecff"],  // midday blue
+    [0.62, "#4a86c4", "#f0cf95", "#ffe9bf"],  // afternoon
+    [0.38, "#6d6aa8", "#f3a24e", "#ffd279"],  // golden hour
+    [0.18, "#322d62", "#d8503f", "#ffce74"],  // sunset
+    [0.0,  "#141b3a", "#34315f", "#b5675a"]   // dusk
   ];
   f = clamp(f, 0, 1);
   for (var i = 0; i < K.length - 1; i++) {
@@ -991,7 +1041,7 @@ function currentPrompt() {
     if (S.held && Math.abs(p.x - (CAR_X + 70)) < 95) return "SPACE: Load dog into car";
     if (allSecured() && Math.abs(p.x - (CAR_X + 70)) < 110) return "SPACE: Drive off!";
     for (var i = 0; i < S.piles.length; i++) if (Math.abs(p.x - S.piles[i].x) < 46) return "SPACE: Scoop the poop";
-    if (inZone(p.x) && hasLooseOrHeld() && S.poop > 35) return "SPACE: Let them go here (dog area)";
+    if (inZone(p.x) && S.held && S.poop > 35) return "SPACE: Let them go here (dog area)";
     if (!S.held) {
       for (var j = 0; j < S.dogs.length; j++) {
         if (S.dogs[j].state === "loose" && Math.abs(S.dogs[j].x - p.x) < 60) return "SPACE: Grab the " + niceName(S.dogs[j].type);
@@ -1002,6 +1052,35 @@ function currentPrompt() {
 }
 
 /* ---------- Title ---------- */
+/* ---------- Highway (pre-gamble drive) ---------- */
+function drawHighway() {
+  drawSky();
+  drawGround();
+  // Car sits centered horizontally; world scrolls past via S.cam.
+  drawCar(W / 2 - 75);
+
+  // Lightweight HUD: just the daylight bar.
+  ctx.fillStyle = "rgba(22,34,46,0.85)";
+  roundRect(10, 10, 264, 72, 8); ctx.fill();
+  text("DAYLIGHT", 28, 35, 16, "#ffd23f", "left", "bold");
+  ctx.fillStyle = "#3b3e42";
+  roundRect(20, 50, 234, 8, 4); ctx.fill();
+  ctx.fillStyle = "#ffd23f";
+  roundRect(20, 50, 234 * clamp(S.daylight / DAYLIGHT_MAX, 0, 1), 8, 4); ctx.fill();
+  text(Math.round(S.daylight) + "", 142, 76, 12, "#cfd6df", "center");
+
+  // Bottom control strip.
+  ctx.fillStyle = "rgba(22,34,46,0.92)"; ctx.fillRect(0, H - 34, W, 34);
+  text("Drive: → accelerate    ← brake    — heading to the rest stop…",
+       W / 2, H - 12, 16, "#dfe7ee", "center");
+
+  if (S.paused) {
+    ctx.fillStyle = "rgba(0,0,0,0.55)"; ctx.fillRect(0, 0, W, H);
+    text("PAUSED", W / 2, H / 2 - 6, 48, "#fff", "center");
+    text("Press Esc to resume", W / 2, H / 2 + 30, 18, "#cfd6df", "center");
+  }
+}
+
 function drawTitle() {
   drawSky();
   drawGround();
@@ -1074,11 +1153,11 @@ function drawGamble() {
 
   panel(W / 2 - 330, 200, 300, 200, "#16324a");
   text("←  PULL OVER NOW", W / 2 - 180, 248, 22, "#9fd3ff", "center");
-  wrap(["Safe. You stop at this rest", "stop with room to spare.", "", "Start: 980 daylight"], W / 2 - 180, 286, 16);
+  wrap(["Safe. You stop at this rest", "stop with room to spare.", "", "Keep the daylight you have."], W / 2 - 180, 286, 16);
 
   panel(W / 2 + 30, 200, 300, 200, "#4a2630");
   text("RISK IT  →", W / 2 + 180, 248, 22, "#ffb3a7", "center");
-  wrap(["Push for the scheduled stop", "for bonus daylight - but your", "pee meter is nearly full!", "Start: 1120 daylight"], W / 2 + 180, 286, 16);
+  wrap(["Push for the scheduled stop", "for bonus daylight - but your", "pee meter is nearly full!", "Bonus: +140 daylight."], W / 2 + 180, 286, 16);
 
   text("Press ← or → to choose", W / 2, H - 40, 18, "#ffd23f", "center");
 }
@@ -1173,6 +1252,7 @@ function render() {
   var st = S.state;
   if (st === "TITLE") drawTitle();
   else if (st === "HOWTO") drawHowTo();
+  else if (st === "HIGHWAY") drawHighway();
   else if (st === "GAMBLE") drawGamble();
   else if (st === "RESULT") drawResult();
   else if (st === "GAMEOVER") drawGameOver();
